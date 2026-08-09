@@ -34,20 +34,58 @@ going direct to their APIs returns higher-resolution masters than Artvee's free
 tier serves. Browsing Artvee yourself is unaffected — drop anything you find
 there into `~/Pictures/Wallpapers` and it joins the rotation.
 
+## Descriptions
+
+Every fetched work is catalogued, so the folder doubles as something to learn
+from. Each run writes two files alongside the images:
+
+- **`GALLERY.md`** — a readable index of everything currently in rotation:
+  artist and life dates, year, medium, origin, museum, the museum's own written
+  description where one exists, and a link to the work's page.
+- **`.artwall.json`** — the hidden metadata store `GALLERY.md` is generated
+  from. Delete it and you lose descriptions, not images.
+
+Prose coverage varies by institution, and the tool is explicit about which
+entries have it:
+
+| Source | Written description |
+|---|---|
+| Cleveland | usually — `wall_description` is the literal museum wall label |
+| Art Institute | sometimes — `short_description`, often absent for prints |
+| The Met | never — its API carries no prose, so entries are facts plus credit line |
+
+Every entry always gets the structured facts and a museum link regardless.
+
+macOS gives no way to ask which wallpaper is currently displayed — the old
+AppleScript hook returns `missing value` under folder rotation, and the Sonoma
+private store holds no image paths. So matching a picture to its entry goes via
+the filename, which carries artist and title; `GALLERY.md` lists it under each
+work.
+
+Images you add by hand are listed under **Not catalogued** rather than silently
+omitted.
+
 ## Install
 
+Runs are manual by default:
+
 ```bash
-./install.sh
+./artwall.py
 ```
 
-Installs a launchd agent that runs Mondays at 09:00, adds 8 images, and prunes
-the folder back to 40 (oldest first). Logs to `~/Library/Logs/artwall.log`.
+To schedule a weekly top-up instead, `./install.sh` installs a launchd agent for
+Mondays at 09:00, logging to `~/Library/Logs/artwall.log`. Remove it with:
 
-Then, once, by hand — macOS moved wallpaper state into a private store in
-Sonoma, so this can't be scripted reliably:
+```bash
+launchctl bootout gui/$(id -u)/com.jaedon.artwall
+rm ~/Library/LaunchAgents/com.jaedon.artwall.plist
+```
+
+Either way, one manual step is needed once — macOS moved wallpaper state into a
+private store in Sonoma, so this can't be scripted reliably:
 
 > System Settings → Wallpaper → scroll to the bottom → **Add Folder** →
-> `~/Pictures/Wallpapers` → set *Change picture: Every hour* + **Random order**
+> `~/Pictures/Wallpapers` → set *Change picture: Every day* + **Random order**
 
 ## Usage
 
@@ -61,7 +99,7 @@ Sonoma, so this can't be scripted reliably:
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--add` | 8 | new images to fetch this run |
+| `--add` | 5 | new images to fetch this run |
 | `--keep` | 40 | prune folder to this many, oldest first |
 | `--min-width` | 3000 | raise to 3800 for a 5K Studio Display |
 | `--min-ratio` | 1.2 | width/height; keeps things landscape-ish |
