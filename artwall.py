@@ -38,11 +38,13 @@ MUSEUM = {
 # Captioning is the one feature with a dependency. Pillow is optional: without
 # it the images still download, they just don't get a caption burned in.
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
     HAVE_PIL = True
 except ImportError:
     HAVE_PIL = False
+
+SCREEN_FALLBACK = (2560, 1440)
 
 FONT_REGULAR = "/System/Library/Fonts/HelveticaNeue.ttc"
 FONT_FALLBACK = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
@@ -272,58 +274,84 @@ def _wrap(draw, text, font, maxw):
     return lines
 
 
-def caption_image(path, e, blurb_lines=4):
-    """Burn a caption panel into the bottom-right corner, in place.
+def detect_screen():
+    """Main display resolution in pixels, for composing at exact screen size."""
+    try:
+        out = os.popen("system_profiler SPDisplaysDataType 2>/dev/null").read()
+        m = re.search(r"Resolution:\s*(\d+)\s*x\s*(\d+)", out)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    return SCREEN_FALLBACK
 
-    Font sizes are proportional to image width so the caption lands at roughly
-    the same apparent size once macOS scales the picture to the display —
-    otherwise an 8000px master would render its text half the size of a 3000px
-    one on the same screen.
+
+def compose(path, e, screen):
+    """Rebuild the image as a museum wall label: art, then caption beside it.
+
+    Composed at exactly the screen resolution, so macOS neither scales nor crops
+    — which also means nothing ever overlaps the artwork. The caption goes in
+    the margin the art already wasn't using: a column at the side when the work
+    is narrower than the screen, a band underneath when it's wider.
     """
-    img = Image.open(path)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    W, H = img.size
+    art = Image.open(path)
+    if art.mode != "RGB":
+        art = art.convert("RGB")
+    SW, SH = screen
+    pad = SW // 47
 
-    f_artist, f_title, f_facts = _font(W // 90), _font(W // 118), _font(W // 150)
-    pad, margin, gap = W // 70, W // 40, W // 260
-    maxw = min(int(W * 0.42), W - 2 * margin) - 2 * pad
+    side = (art.width / art.height) < (SW / SH)
+    if side:
+        col = int(SW * 0.24)
+        art_box = (SW - col - pad * 2, SH - pad * 2)
+    else:
+        band = int(SH * 0.22)
+        art_box = (SW - pad * 2, SH - band - pad * 2)
 
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
+    # Ambient backdrop: the art itself, blown up, blurred and dimmed.
+    canvas = Image.new("RGB", (SW, SH))
+    bg = art.resize((SW, SH), Image.LANCZOS).filter(ImageFilter.GaussianBlur(60))
+    canvas.paste(Image.blend(bg, Image.new("RGB", (SW, SH), (10, 10, 12)), 0.66))
 
-    # (text, font, colour) top to bottom; None entries are dropped.
-    blocks = [([e.get("artist") or "Unknown"], f_artist, (255, 255, 255, 255))]
+    a = art.copy()
+    a.thumbnail(art_box, Image.LANCZOS)
+    ax = pad if side else (SW - a.width) // 2
+    ay = (SH - a.height) // 2 if side else pad
+    canvas.paste(a, (ax, ay))
+
+    d = ImageDraw.Draw(canvas)
+    if side:
+        x, y = ax + a.width + pad, ay + pad // 8
+        maxw = SW - x - pad
+    else:
+        x, y = pad * 2, ay + a.height + pad
+        maxw = SW - pad * 4
+
+    f_artist, f_title = _font(SW // 67), _font(SW // 91)
+    f_facts, f_blurb = _font(SW // 122), _font(SW // 128)
+    room = (SH - pad - y) if side else (SH - pad - y)
+
+    def emit(text, font, colour, maxlines, lead):
+        nonlocal y
+        for line in _wrap(d, text, font, maxw)[:maxlines]:
+            if y + lead > (SH - pad):
+                return
+            d.text((x, y), line, font=font, fill=colour)
+            y += lead
+
+    emit(e.get("artist") or "Unknown", f_artist, (255, 255, 255), 2, int(f_artist.size * 1.22))
+    y += pad // 6
     if e.get("title"):
-        blocks.append((_wrap(draw, e["title"], f_title, maxw)[:2], f_title, (255, 255, 255, 230)))
+        emit(e["title"], f_title, (238, 238, 240), 3 if side else 1, int(f_title.size * 1.3))
+    y += pad // 4
     if facts(e):
-        blocks.append((_wrap(draw, facts(e), f_facts, maxw)[:2], f_facts, (255, 255, 255, 175)))
+        emit(facts(e), f_facts, (168, 168, 176), 4 if side else 1, int(f_facts.size * 1.35))
     if e.get("blurb"):
-        wrapped = _wrap(draw, e["blurb"], f_facts, maxw)
-        if len(wrapped) > blurb_lines:
-            wrapped = wrapped[:blurb_lines]
-            wrapped[-1] = wrapped[-1].rstrip(" .,;:") + "…"
-        blocks.append((wrapped, f_facts, (255, 255, 255, 175)))
+        y += pad // 3
+        lines = int(room / (f_blurb.size * 1.45)) if side else 3
+        emit(e["blurb"], f_blurb, (196, 196, 202), max(0, lines), int(f_blurb.size * 1.45))
 
-    heights = [(font.size + gap) * len(lines) for lines, font, _ in blocks]
-    panel_h = sum(heights) + 2 * pad + gap * (len(blocks) - 1)
-    panel_w = maxw + 2 * pad
-    x0, y0 = W - margin - panel_w, H - margin - panel_h
-
-    draw.rounded_rectangle(
-        [x0, y0, x0 + panel_w, y0 + panel_h], radius=pad, fill=(0, 0, 0, 165)
-    )
-
-    y = y0 + pad
-    for lines, font, colour in blocks:
-        for line in lines:
-            draw.text((x0 + pad, y), line, font=font, fill=colour)
-            y += font.size + gap
-        y += gap
-
-    Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB").save(
-        path, "JPEG", quality=92
-    )
+    canvas.save(path, "JPEG", quality=90)
 
 
 def load_store(dest):
@@ -417,7 +445,7 @@ def aic_best_url(image_id, cap=MAX_PX):
     return f"{base}/full/{best},/0/default.jpg"
 
 
-def fetch(c, dest, min_width=0):
+def fetch(c, dest, min_width=0, screen=None):
     name = f"{c['source']}-{c['id']}-{slug(c.get('artist'))}-{slug(c.get('title'))}.jpg"
     path = dest / name
     url = aic_best_url(c["image_id"]) if c.get("image_id") else c["url"]
@@ -436,6 +464,8 @@ def fetch(c, dest, min_width=0):
         if w < min_width:
             path.unlink()
             raise ValueError(f"served {w}px, below --min-width {min_width}")
+        if screen:
+            compose(path, c, screen)
     return path
 
 
@@ -451,18 +481,23 @@ def main():
     ap.add_argument("--min-ratio", type=float, default=1.2, help="w/h; 1.2 keeps it landscape-ish")
     ap.add_argument("--sources", help="comma-separated subset of: aic,cma,met")
     ap.add_argument("--list", action="store_true", help="list current folder and exit")
+    ap.add_argument("--raw", action="store_true", help="save the bare artwork, no label")
+    ap.add_argument("--screen", help="compose for this size, e.g. 2560x1440 (default: detected)")
     ap.add_argument(
-        "--no-caption", action="store_true", help="don't burn the caption into the image"
-    )
-    ap.add_argument(
-        "--recaption",
+        "--recompose",
         action="store_true",
-        help="caption already-downloaded images that don't have one yet, then exit",
+        help="re-download and rebuild every catalogued image, then exit",
     )
     args = ap.parse_args()
-    caption_on = HAVE_PIL and not args.no_caption
-    if args.no_caption is False and not HAVE_PIL:
-        print("  ! Pillow not installed — captions skipped (pip3 install --user Pillow)", file=sys.stderr)
+
+    screen = None
+    if not args.raw:
+        if not HAVE_PIL:
+            print("  ! Pillow missing — saving raw art (pip3 install --user Pillow)", file=sys.stderr)
+        elif args.screen:
+            screen = tuple(int(v) for v in args.screen.lower().split("x"))
+        else:
+            screen = detect_screen()
 
     args.dest.mkdir(parents=True, exist_ok=True)
     existing = sorted(args.dest.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
@@ -473,22 +508,23 @@ def main():
         print(f"\n{len(existing)} images in {args.dest}")
         return 0
 
-    if args.recaption:
+    if args.recompose:
+        # Composing overwrites the file, so a rebuild has to start from the
+        # source again rather than re-processing an already-composed image.
         store = load_store(args.dest)
         done = 0
+        print(f"Rebuilding at {screen[0]}x{screen[1]}…" if screen else "Rebuilding raw…")
         for key, e in store.items():
-            path = args.dest / (e.get("filename") or "")
-            if e.get("captioned") or not path.exists():
-                continue
             try:
-                caption_image(path, e)
-                e["captioned"] = True
+                path = fetch(e, args.dest, args.min_width, screen)
+                e["filename"], e["composed"] = path.name, bool(screen)
                 done += 1
                 print(f"  ✓ {e.get('artist')} — {e.get('title')}")
             except Exception as exc:
                 print(f"  ! {key}: {exc}", file=sys.stderr)
         save_store(args.dest, store)
-        print(f"\nCaptioned {done} image(s).")
+        write_gallery(args.dest, store)
+        print(f"\nRebuilt {done} image(s).")
         return 0
 
     have = {"-".join(p.name.split("-")[:2]) for p in existing if "-" in p.name}
@@ -520,14 +556,12 @@ def main():
         if added >= args.add:
             break
         try:
-            path = fetch(c, args.dest, args.min_width)
+            path = fetch(c, args.dest, args.min_width, screen)
             added += 1
-            if caption_on:
-                caption_image(path, c)
             store[f"{c['source']}-{c['id']}"] = {
                 **c,
                 "filename": path.name,
-                "captioned": caption_on,
+                "composed": bool(screen),
             }
             print(f"\n  + {c.get('artist') or '?'} — {c.get('title')}")
             print(f"    {facts(c)} · {c['width']}×{c['height']}")

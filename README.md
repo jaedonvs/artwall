@@ -47,27 +47,33 @@ there into `~/Pictures/Wallpapers` and it joins the rotation.
 
 ## Descriptions
 
-Every fetched work gets a caption panel burned into the **bottom-right corner**
-of the image itself — artist, title, date, medium, museum, and the opening of
-the description. Since macOS offers no way to ask which wallpaper is currently
-displayed, putting the text in the picture is the only way to know what you're
-looking at without going hunting.
+Each wallpaper is composed as a **museum wall label**: the artwork, and beside
+it the artist, title, date, medium, museum, and the museum's own description.
+Since macOS offers no way to ask which wallpaper is currently displayed, putting
+the text in the picture is the only way to know what you're looking at.
 
-Font sizes scale with image width, so the caption lands at roughly the same
-apparent size once macOS scales the picture to your display — otherwise a
-6000px master would render its text at half the size of a 3000px one on the
-same screen.
+Nothing overlaps the artwork. The label goes in the margin the art wasn't using
+anyway — a **column at the side** when the work is narrower than the screen (the
+common case: median aspect here is ~1.45 against a 1.78 display), or a **band
+underneath** when it's wider. The backdrop is the artwork itself, blown up,
+blurred and dimmed.
 
-Captioning is the one feature with a dependency (Pillow). It degrades
-gracefully: without Pillow the images still download, just uncaptioned.
+Images are composed at **exactly your screen resolution**, detected via
+`system_profiler`. That means macOS neither scales nor crops them, so you stop
+losing the top and bottom of every painting to "Fill Screen".
 
 ```bash
-./artwall.py --no-caption     # leave images untouched
-./artwall.py --recaption      # caption already-downloaded images, then exit
+./artwall.py --raw                  # bare artwork, no label
+./artwall.py --screen 3840x2160     # compose for a different display
+./artwall.py --recompose            # re-download and rebuild everything
 ```
 
-`--recaption` is idempotent — it skips anything already marked `captioned` in
-the store, so it won't double-stamp.
+Composing overwrites the file, so `--recompose` re-downloads from source rather
+than re-processing an already-composed image — otherwise the art would shrink
+and the label double up on every pass.
+
+Composing is the one feature with a dependency (Pillow). It degrades
+gracefully: without Pillow the artwork still downloads, just unlabelled.
 
 Each run also writes two files alongside the images:
 
@@ -119,6 +125,9 @@ private store in Sonoma, so this can't be scripted reliably:
 > System Settings → Wallpaper → scroll to the bottom → **Add Folder** →
 > `~/Pictures/Wallpapers` → set *Change picture: Every day* + **Random order**
 
+Since images are already composed at screen resolution, either "Fill Screen" or
+"Fit to Screen" works — there's nothing left to scale.
+
 ## Usage
 
 ```bash
@@ -137,8 +146,9 @@ private store in Sonoma, so this can't be scripted reliably:
 | `--min-ratio` | 1.2 | width/height; keeps things landscape-ish |
 | `--topics` | see `TOPICS` | comma-separated full-text search terms |
 | `--sources` | all | subset of `aic,cma,met` |
-| `--no-caption` | off | skip burning the caption into the image |
-| `--recaption` | — | caption existing images that lack one, then exit |
+| `--raw` | off | save the bare artwork with no label |
+| `--screen` | detected | compose for this size, e.g. `2560x1440` |
+| `--recompose` | — | re-download and rebuild everything, then exit |
 
 The Art Institute's IIIF server returns 403 without an `AIC-User-Agent` header
 carrying a contact channel. It defaults to this repo's URL; set
