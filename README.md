@@ -8,9 +8,9 @@ scheduled run.
 
 ## Sources
 
-| Source | Key? | Max resolution | Dimensions known before download? |
+| Source | Key? | Delivered resolution | Dimensions known before download? |
 |---|---|---|---|
-| Art Institute of Chicago | no | ~18000px via IIIF | yes, in search results |
+| Art Institute of Chicago | no | largest IIIF tier ≤ 6000px | claimed in search, verified on disk |
 | Cleveland Museum of Art | no | 3400px (`print` JPEG) | yes, in search results |
 | Metropolitan Museum of Art | no | ~4000px typical | no — see below |
 
@@ -21,6 +21,17 @@ The Met's API never reports image dimensions, so orientation filtering needs a
 ranged `Range: bytes=0-131071` read of each candidate and a hand-rolled JPEG SOF
 parser (`jpeg_dims`). That costs two requests per candidate instead of zero,
 which is why the Met's per-topic limit is 10 against the others' 40.
+
+The Art Institute's IIIF server has a trap: it serves any width **up to 3000**,
+but above that only the exact tier widths its image pyramid advertises. An
+off-tier request like `6000,` silently returns 3000px rather than erroring, so a
+naive `min(master_width, 6000)` caps every large work at 3000. `aic_best_url`
+reads `info.json` and picks the largest advertised tier ≤ 6000.
+
+Because catalogue dimensions can also be stale or rounded — one work reported
+8000×6000 and delivered 3000×2482 — every download is re-measured from the bytes
+on disk. The store records what actually arrived, and anything below
+`--min-width` is deleted rather than kept.
 
 ### Why not Artvee
 
@@ -36,8 +47,29 @@ there into `~/Pictures/Wallpapers` and it joins the rotation.
 
 ## Descriptions
 
-Every fetched work is catalogued, so the folder doubles as something to learn
-from. Each run writes two files alongside the images:
+Every fetched work gets a caption panel burned into the **bottom-right corner**
+of the image itself — artist, title, date, medium, museum, and the opening of
+the description. Since macOS offers no way to ask which wallpaper is currently
+displayed, putting the text in the picture is the only way to know what you're
+looking at without going hunting.
+
+Font sizes scale with image width, so the caption lands at roughly the same
+apparent size once macOS scales the picture to your display — otherwise a
+6000px master would render its text at half the size of a 3000px one on the
+same screen.
+
+Captioning is the one feature with a dependency (Pillow). It degrades
+gracefully: without Pillow the images still download, just uncaptioned.
+
+```bash
+./artwall.py --no-caption     # leave images untouched
+./artwall.py --recaption      # caption already-downloaded images, then exit
+```
+
+`--recaption` is idempotent — it skips anything already marked `captioned` in
+the store, so it won't double-stamp.
+
+Each run also writes two files alongside the images:
 
 - **`GALLERY.md`** — a readable index of everything currently in rotation:
   artist and life dates, year, medium, origin, museum, the museum's own written
@@ -105,6 +137,8 @@ private store in Sonoma, so this can't be scripted reliably:
 | `--min-ratio` | 1.2 | width/height; keeps things landscape-ish |
 | `--topics` | see `TOPICS` | comma-separated full-text search terms |
 | `--sources` | all | subset of `aic,cma,met` |
+| `--no-caption` | off | skip burning the caption into the image |
+| `--recaption` | — | caption existing images that lack one, then exit |
 
 The Art Institute's IIIF server returns 403 without an `AIC-User-Agent` header
 carrying a contact channel. It defaults to this repo's URL; set

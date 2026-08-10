@@ -35,6 +35,18 @@ MUSEUM = {
     "met": "The Metropolitan Museum of Art",
 }
 
+# Captioning is the one feature with a dependency. Pillow is optional: without
+# it the images still download, they just don't get a caption burned in.
+try:
+    from PIL import Image, ImageDraw, ImageFont
+
+    HAVE_PIL = True
+except ImportError:
+    HAVE_PIL = False
+
+FONT_REGULAR = "/System/Library/Fonts/HelveticaNeue.ttc"
+FONT_FALLBACK = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+
 UA = "artwall/1.0 (personal wallpaper fetcher; stdlib urllib)"
 # The Art Institute's IIIF server 403s without this identifying header. They ask
 # for a contact channel; set ARTWALL_CONTACT to your own if you'd rather they
@@ -138,10 +150,11 @@ def aic(topic, limit):
         w, h = t.get("width"), t.get("height")
         if not (img and w and h):
             continue
-        px = min(w, 6000)  # IIIF: native width, capped to something sane
         yield {
             "source": "aic",
             "id": a["id"],
+            # Resolved to a real IIIF tier at download time; see aic_best_url.
+            "image_id": img,
             "title": a.get("title"),
             "artist": a.get("artist_title"),
             "artist_full": clean(a.get("artist_display")),
@@ -153,7 +166,7 @@ def aic(topic, limit):
             "page": f"https://www.artic.edu/artworks/{a['id']}",
             "width": w,
             "height": h,
-            "url": f"https://www.artic.edu/iiif/2/{img}/full/{px},/0/default.jpg",
+            "url": f"https://www.artic.edu/iiif/2/{img}/full/3000,/0/default.jpg",
         }
 
 
@@ -236,6 +249,83 @@ SOURCES = [(aic, 40), (cma, 40), (met, 10)]
 # ------------------------------------------------------------------------- main
 
 
+def _font(size):
+    for path in (FONT_REGULAR, FONT_FALLBACK):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap(draw, text, font, maxw):
+    lines, line = [], ""
+    for word in text.split():
+        trial = f"{line} {word}".strip()
+        if draw.textlength(trial, font=font) <= maxw or not line:
+            line = trial
+        else:
+            lines.append(line)
+            line = word
+    if line:
+        lines.append(line)
+    return lines
+
+
+def caption_image(path, e, blurb_lines=4):
+    """Burn a caption panel into the bottom-right corner, in place.
+
+    Font sizes are proportional to image width so the caption lands at roughly
+    the same apparent size once macOS scales the picture to the display —
+    otherwise an 8000px master would render its text half the size of a 3000px
+    one on the same screen.
+    """
+    img = Image.open(path)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    W, H = img.size
+
+    f_artist, f_title, f_facts = _font(W // 90), _font(W // 118), _font(W // 150)
+    pad, margin, gap = W // 70, W // 40, W // 260
+    maxw = min(int(W * 0.42), W - 2 * margin) - 2 * pad
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # (text, font, colour) top to bottom; None entries are dropped.
+    blocks = [([e.get("artist") or "Unknown"], f_artist, (255, 255, 255, 255))]
+    if e.get("title"):
+        blocks.append((_wrap(draw, e["title"], f_title, maxw)[:2], f_title, (255, 255, 255, 230)))
+    if facts(e):
+        blocks.append((_wrap(draw, facts(e), f_facts, maxw)[:2], f_facts, (255, 255, 255, 175)))
+    if e.get("blurb"):
+        wrapped = _wrap(draw, e["blurb"], f_facts, maxw)
+        if len(wrapped) > blurb_lines:
+            wrapped = wrapped[:blurb_lines]
+            wrapped[-1] = wrapped[-1].rstrip(" .,;:") + "…"
+        blocks.append((wrapped, f_facts, (255, 255, 255, 175)))
+
+    heights = [(font.size + gap) * len(lines) for lines, font, _ in blocks]
+    panel_h = sum(heights) + 2 * pad + gap * (len(blocks) - 1)
+    panel_w = maxw + 2 * pad
+    x0, y0 = W - margin - panel_w, H - margin - panel_h
+
+    draw.rounded_rectangle(
+        [x0, y0, x0 + panel_w, y0 + panel_h], radius=pad, fill=(0, 0, 0, 165)
+    )
+
+    y = y0 + pad
+    for lines, font, colour in blocks:
+        for line in lines:
+            draw.text((x0 + pad, y), line, font=font, fill=colour)
+            y += font.size + gap
+        y += gap
+
+    Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB").save(
+        path, "JPEG", quality=92
+    )
+
+
 def load_store(dest):
     try:
         return json.loads((dest / STORE).read_text())
@@ -306,15 +396,46 @@ def wanted(c, min_width, min_ratio):
     return c["width"] >= min_width and c["width"] / c["height"] >= min_ratio
 
 
-def fetch(c, dest):
+MAX_PX = 6000  # beyond this, files get large for no visible gain on any display
+
+
+def aic_best_url(image_id, cap=MAX_PX):
+    """Pick the largest IIIF tier at or below `cap`.
+
+    The Art Institute serves any width up to 3000, but above that ONLY the exact
+    tier widths its pyramid advertises — an off-tier request like 6000 silently
+    clamps to 3000. info.json lists the real tiers, so ask for one of those.
+    """
+    base = f"https://www.artic.edu/iiif/2/{image_id}"
+    try:
+        sizes = get_json(f"{base}/info.json").get("sizes") or []
+        widths = sorted(s["width"] for s in sizes if s.get("width"))
+    except Exception:
+        widths = []
+    ok = [w for w in widths if w <= cap]
+    best = max(ok) if ok else min(cap, 3000)
+    return f"{base}/full/{best},/0/default.jpg"
+
+
+def fetch(c, dest, min_width=0):
     name = f"{c['source']}-{c['id']}-{slug(c.get('artist'))}-{slug(c.get('title'))}.jpg"
     path = dest / name
-    req = urllib.request.Request(safe_url(c["url"]), headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as f:
+    url = aic_best_url(c["image_id"]) if c.get("image_id") else c["url"]
+    req = urllib.request.Request(safe_url(url), headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=180) as r, open(path, "wb") as f:
         f.write(r.read())
     if path.stat().st_size < 50_000:  # truncated / placeholder response
         path.unlink()
         raise ValueError("suspiciously small download")
+
+    # Catalogue dimensions can be wrong or stale, and IIIF may serve less than
+    # asked. Trust the bytes on disk, not the API.
+    if HAVE_PIL:
+        w, h = Image.open(path).size
+        c["width"], c["height"] = w, h
+        if w < min_width:
+            path.unlink()
+            raise ValueError(f"served {w}px, below --min-width {min_width}")
     return path
 
 
@@ -330,7 +451,18 @@ def main():
     ap.add_argument("--min-ratio", type=float, default=1.2, help="w/h; 1.2 keeps it landscape-ish")
     ap.add_argument("--sources", help="comma-separated subset of: aic,cma,met")
     ap.add_argument("--list", action="store_true", help="list current folder and exit")
+    ap.add_argument(
+        "--no-caption", action="store_true", help="don't burn the caption into the image"
+    )
+    ap.add_argument(
+        "--recaption",
+        action="store_true",
+        help="caption already-downloaded images that don't have one yet, then exit",
+    )
     args = ap.parse_args()
+    caption_on = HAVE_PIL and not args.no_caption
+    if args.no_caption is False and not HAVE_PIL:
+        print("  ! Pillow not installed — captions skipped (pip3 install --user Pillow)", file=sys.stderr)
 
     args.dest.mkdir(parents=True, exist_ok=True)
     existing = sorted(args.dest.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
@@ -339,6 +471,24 @@ def main():
         for p in existing:
             print(f"{p.stat().st_size // 1024:>6} KB  {p.name}")
         print(f"\n{len(existing)} images in {args.dest}")
+        return 0
+
+    if args.recaption:
+        store = load_store(args.dest)
+        done = 0
+        for key, e in store.items():
+            path = args.dest / (e.get("filename") or "")
+            if e.get("captioned") or not path.exists():
+                continue
+            try:
+                caption_image(path, e)
+                e["captioned"] = True
+                done += 1
+                print(f"  ✓ {e.get('artist')} — {e.get('title')}")
+            except Exception as exc:
+                print(f"  ! {key}: {exc}", file=sys.stderr)
+        save_store(args.dest, store)
+        print(f"\nCaptioned {done} image(s).")
         return 0
 
     have = {"-".join(p.name.split("-")[:2]) for p in existing if "-" in p.name}
@@ -370,9 +520,15 @@ def main():
         if added >= args.add:
             break
         try:
-            path = fetch(c, args.dest)
+            path = fetch(c, args.dest, args.min_width)
             added += 1
-            store[f"{c['source']}-{c['id']}"] = {**c, "filename": path.name}
+            if caption_on:
+                caption_image(path, c)
+            store[f"{c['source']}-{c['id']}"] = {
+                **c,
+                "filename": path.name,
+                "captioned": caption_on,
+            }
             print(f"\n  + {c.get('artist') or '?'} — {c.get('title')}")
             print(f"    {facts(c)} · {c['width']}×{c['height']}")
             if c.get("blurb"):
