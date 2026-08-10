@@ -21,14 +21,13 @@ cat > "$PLIST" <<PLIST
         <string>/usr/bin/python3</string>
         <string>$REPO/artwall.py</string>
         <string>--add</string>
-        <string>8</string>
+        <string>1</string>
         <string>--keep</string>
-        <string>40</string>
+        <string>1</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
-        <key>Weekday</key><integer>1</integer>
-        <key>Hour</key><integer>9</integer>
+        <key>Hour</key><integer>7</integer>
         <key>Minute</key><integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
@@ -43,8 +42,12 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 
 echo "Installed $LABEL -> $REPO/artwall.py"
-echo "Runs Mondays 09:00. Logs: ~/Library/Logs/artwall.log"
+echo "Runs daily at 07:00, swapping the single image. Logs: ~/Library/Logs/artwall.log"
 echo
 echo "One manual step remains:"
 echo "  System Settings -> Wallpaper -> Add Folder -> ~/Pictures/Wallpapers"
-echo "  then set 'Change picture: Every hour' + 'Random order'"
+echo "  then set 'Change picture: Every day' + 'Random order'"
+echo
+echo "Keeping exactly one image is what makes the desktop and lock screen agree:"
+echo "macOS shuffles them independently, so a one-item folder is the only choice"
+echo "both can land on."

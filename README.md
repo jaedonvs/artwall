@@ -77,11 +77,16 @@ gracefully: without Pillow the artwork still downloads, just unlabelled.
 
 Each run also writes two files alongside the images:
 
-- **`GALLERY.md`** — a readable index of everything currently in rotation:
-  artist and life dates, year, medium, origin, museum, the museum's own written
-  description where one exists, and a link to the work's page.
+- **`GALLERY.md`** — artist and life dates, year, medium, origin, museum, the
+  museum's own written description where one exists, and a link to the work's
+  page. Split into what's **in rotation** now and what's been **previously
+  shown**.
 - **`.artwall.json`** — the hidden metadata store `GALLERY.md` is generated
   from. Delete it and you lose descriptions, not images.
+
+Store entries deliberately outlive their images. They are both the dedup memory
+(so a work is never fetched twice) and the reading history — with a small
+`--keep`, the folder is no longer a record of what you've seen.
 
 Prose coverage varies by institution, and the tool is explicit about which
 entries have it:
@@ -111,8 +116,8 @@ Runs are manual by default:
 ./artwall.py
 ```
 
-To schedule a weekly top-up instead, `./install.sh` installs a launchd agent for
-Mondays at 09:00, logging to `~/Library/Logs/artwall.log`. Remove it with:
+`./install.sh` installs a launchd agent that runs daily at 07:00 with
+`--add 1 --keep 1`, logging to `~/Library/Logs/artwall.log`. Remove it with:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.jaedon.artwall
@@ -128,6 +133,24 @@ private store in Sonoma, so this can't be scripted reliably:
 Since images are already composed at screen resolution, either "Fill Screen" or
 "Fit to Screen" works — there's nothing left to scale.
 
+### Matching the lock screen
+
+macOS keeps two wallpaper contexts — `AllSpacesAndDisplays` (desktop) and
+`SystemDefault` (lock screen). Pointing both at the same folder is not enough:
+they shuffle **independently**, each holding its own current pick, so with N
+images they agree roughly 1 day in N. There is no setting to link the choice.
+
+The fix is to remove the choice. Keep exactly **one** image in the folder and
+let artwall swap it, which is what the installed job does:
+
+```bash
+./artwall.py --add 1 --keep 1
+```
+
+Two shufflers over a one-item folder can only land on the same image. You still
+get a new work daily; the rotation comes from artwall replacing the file rather
+than from macOS picking among many.
+
 ## Usage
 
 ```bash
@@ -141,7 +164,7 @@ Since images are already composed at screen resolution, either "Fill Screen" or
 | Flag | Default | Notes |
 |---|---|---|
 | `--add` | 5 | new images to fetch this run |
-| `--keep` | 40 | prune folder to this many, oldest first |
+| `--keep` | 40 | prune folder to this many, oldest first (`1` to match the lock screen) |
 | `--min-width` | 3000 | raise to 3800 for a 5K Studio Display |
 | `--min-ratio` | 1.2 | width/height; keeps things landscape-ish |
 | `--topics` | see `TOPICS` | comma-separated full-text search terms |

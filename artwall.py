@@ -377,13 +377,19 @@ def write_gallery(dest, store):
     Images added by hand (an Artvee download, say) have no store entry; list
     them separately rather than pretending the folder holds less than it does.
     """
-    entries = sorted(store.values(), key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
-    catalogued = {e.get("filename") for e in entries}
-    strays = sorted(p.name for p in dest.glob("*.jpg") if p.name not in catalogued)
+    on_disk = {p.name for p in dest.glob("*.jpg")}
+    live, past = [], []
+    for e in store.values():
+        (live if e.get("filename") in on_disk else past).append(e)
+    live.sort(key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
+    past.sort(key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
+    entries = live
+    strays = sorted(n for n in on_disk if n not in {e.get("filename") for e in store.values()})
     out = [
-        "# Wallpapers in rotation",
+        "# Wallpapers",
         "",
-        f"*{len(entries)} works · regenerated {date.today().isoformat()}*",
+        f"*{len(entries)} in rotation, {len(past)} previously shown · "
+        f"regenerated {date.today().isoformat()}*",
         "",
         "Filenames are `{source}-{id}-{artist}-{title}.jpg`, so you can match "
         "an image in Finder to its entry below.",
@@ -404,6 +410,25 @@ def write_gallery(dest, store):
             out += [e["blurb"], ""]
         if e.get("page"):
             out += [f"[View at the museum]({e['page']})", ""]
+        out += ["---", ""]
+
+    if past:
+        out += [
+            "## Previously shown",
+            "",
+            "Rotated out of the folder, kept here so the record survives — and so "
+            "the same work isn't fetched twice.",
+            "",
+        ]
+        for e in past:
+            bits = [f"**{e.get('artist') or 'Unknown'} — {e.get('title') or 'Untitled'}**"]
+            if facts(e):
+                bits.append(f"  \n{facts(e)}")
+            if e.get("blurb"):
+                bits.append(f"  \n{clean(e['blurb'], 400)}")
+            if e.get("page"):
+                bits.append(f"  \n[View at the museum]({e['page']})")
+            out += ["".join(bits), ""]
         out += ["---", ""]
 
     if strays:
@@ -514,7 +539,10 @@ def main():
         store = load_store(args.dest)
         done = 0
         print(f"Rebuilding at {screen[0]}x{screen[1]}…" if screen else "Rebuilding raw…")
+        on_disk = {p.name for p in args.dest.glob("*.jpg")}
         for key, e in store.items():
+            if e.get("filename") not in on_disk:
+                continue  # archived: catalogued but rotated out, no file to rebuild
             try:
                 path = fetch(e, args.dest, args.min_width, screen)
                 e["filename"], e["composed"] = path.name, bool(screen)
@@ -527,7 +555,11 @@ def main():
         print(f"\nRebuilt {done} image(s).")
         return 0
 
-    have = {"-".join(p.name.split("-")[:2]) for p in existing if "-" in p.name}
+    # Dedup against everything ever fetched, not just what's still on disk —
+    # with a small --keep, the folder is no longer a record of what's been seen.
+    have = set(load_store(args.dest)) | {
+        "-".join(p.name.split("-")[:2]) for p in existing if "-" in p.name
+    }
     topics = [t.strip() for t in args.topics.split(",")] if args.topics else TOPICS
     sources = SOURCES
     if args.sources:
@@ -571,26 +603,23 @@ def main():
             print(f"  ! {c['source']}-{c['id']}: {e}", file=sys.stderr)
 
     files = sorted(args.dest.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
-    pruned = files[: max(0, len(files) - args.keep)]
-    for p in pruned:
+    for p in files[: max(0, len(files) - args.keep)]:
         p.unlink()
-        for key, e in list(store.items()):
-            if e.get("filename") == p.name:
-                del store[key]
         print(f"  - pruned {p.name}")
 
-    # Drop entries whose image is gone (deleted by hand, or by an older run).
-    on_disk = {p.name for p in args.dest.glob("*.jpg")}
-    for key, e in list(store.items()):
-        if e.get("filename") not in on_disk:
-            del store[key]
-
+    # Store entries outlive their images on purpose: they're the dedup memory
+    # (so a work isn't fetched twice) and the GALLERY history. Pruning the
+    # folder to one image would otherwise erase both.
     save_store(args.dest, store)
     write_gallery(args.dest, store)
 
+    live = {p.name for p in args.dest.glob("*.jpg")}
     described = sum(1 for e in store.values() if e.get("blurb"))
-    print(f"\nAdded {added}. Folder holds {len(on_disk)} images at {args.dest}")
-    print(f"Wrote {GALLERY} — {len(store)} catalogued, {described} with a written description")
+    print(f"\nAdded {added}. Folder holds {len(live)} image(s) at {args.dest}")
+    print(
+        f"Wrote {GALLERY} — {len(live)} in rotation, {len(store) - len(live)} archived, "
+        f"{described} with a written description"
+    )
     return 0
 
 
