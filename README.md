@@ -104,16 +104,30 @@ Store entries deliberately outlive their images: they are both the dedup memory
 (so a work is never fetched twice) and the reading history. With one image live,
 the folder is no record of what you've seen.
 
-Prose coverage varies by institution, and the tool is explicit about which
-entries have it:
+### Written for a beginner
 
-| Source | Written description |
-|---|---|
-| Cleveland | usually — `wall_description` is the literal museum wall label |
-| Art Institute | sometimes — `short_description`, often absent for prints |
-| The Met | never — its API carries no prose, so entries are facts plus credit line |
+Museum prose is patchy — Cleveland usually has a wall label, the Art Institute
+often doesn't for prints, and the Met's API carries none at all. Left at that,
+about half of all works would show facts and nothing else. So the label carries
+up to three sections:
 
-Every entry always gets the structured facts and a museum link regardless.
+| Section | Source | Coverage |
+|---|---|---|
+| **About this work** | the museum's own description | ~50% |
+| **About the artist** | Wikipedia summary, first two sentences | most named artists |
+| **Terms** | built-in `GLOSSARY`, matched on style and medium | most works |
+
+The glossary exists because catalogue vocabulary is opaque to a newcomer —
+*mezzotint*, *ōban*, *gouache*, *ukiyo-e* mean nothing until someone explains
+them. Terms are matched as substrings against each work's style, medium, origin
+and title, longest match first, capped at two so the label doesn't turn into a
+dictionary.
+
+Artist lookup retries with `(painter)` and `(artist)` suffixes, and rejects
+disambiguation pages — plain "John Martin" returns *"John Martin may refer
+to:"*, which is worse than no bio at all.
+
+Both are cached in the store, so a rebuild never re-fetches them.
 
 macOS gives no way to ask which wallpaper is currently displayed — the old
 AppleScript hook returns `missing value` under folder rotation, and the Sonoma

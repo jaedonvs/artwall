@@ -64,6 +64,38 @@ CONTACT = os.environ.get("ARTWALL_CONTACT", "https://github.com/jaedonvs/artwall
 HEADERS = {"User-Agent": UA, "AIC-User-Agent": f"artwall ({CONTACT})"}
 
 MET = "https://collectionapi.metmuseum.org/public/collection/v1"
+WIKI = "https://en.wikipedia.org/api/rest_v1/page/summary/"
+
+# Plain-English glossary for the jargon museum metadata is full of. Matched as
+# substrings against a work's style, medium and origin, so a beginner isn't left
+# guessing what "mezzotint" or "ōban" means. Longest match wins per work.
+GLOSSARY = {
+    "ukiyo-e": "Japanese woodblock prints of the “floating world” — theatre, city life and landscape, mass-produced for ordinary buyers in Edo-era Japan.",
+    "woodblock": "Printed by carving a design into wood, inking the raised surface and pressing paper onto it. A separate block is cut for each colour.",
+    "mezzotint": "The whole metal plate is roughened so it would print solid black, then smoothed back where light is wanted. Gives unusually deep, velvety darks.",
+    "aquatint": "An etching technique using powdered resin to bite tonal areas rather than lines, producing washes that look like watercolour.",
+    "etching": "Lines are drawn through a waxy coating on a metal plate, then acid bites them in. The plate is inked and printed.",
+    "engraving": "Lines cut directly into metal with a hand tool. Sharper and more deliberate than etching, since there's no acid and no undoing.",
+    "lithograph": "Drawn in grease on stone; the stone is wetted so ink sticks only to the drawing. Prints look close to the artist's own hand.",
+    "gouache": "Watercolour made opaque with added white, so it sits flat and solid instead of translucent.",
+    "watercolor": "Pigment in water on paper, built up in transparent layers. The paper's whiteness supplies the light, so highlights are areas left bare.",
+    "oil on canvas": "Pigment bound in oil. It dries slowly, which lets colours be blended wet and reworked over weeks — the reason oil dominates Western painting.",
+    "oil on fabric": "Pigment bound in oil. It dries slowly, which lets colours be blended wet and reworked over weeks — the reason oil dominates Western painting.",
+    "graphite": "Pencil. Usually a working drawing rather than a finished piece — a chance to see an artist thinking.",
+    "folding screen": "A room divider painted across hinged panels, read right to left. Made to be seen in changing light, not hung flat.",
+    "albumen": "An early photographic print on paper coated with egg white, giving the warm brown tone typical of 19th-century photographs.",
+    "impressionism": "1870s France: painting outdoors, fast, chasing changing light. Visible brushstrokes and everyday subjects, which critics first took as unfinished.",
+    "post-impressionism": "What came after the Impressionists — Cézanne, Van Gogh, Gauguin — keeping the bright colour but pushing toward structure, emotion and pattern.",
+    "hudson river school": "19th-century American landscape painters treating wilderness as something close to sacred, with vast views and glowing light.",
+    "art nouveau": "Around 1900: whiplash curves, plant forms and flat colour, applied to posters, glass and buildings alike. Deliberately modern and decorative.",
+    "arts and crafts": "A Victorian reaction against factory goods, arguing for handmade work and honest materials. William Morris was its loudest voice.",
+    "romanticism": "Early 19th century: feeling over reason. Storms, ruins and the sublime — nature as overwhelming rather than orderly.",
+    "realism": "Mid-19th century: ordinary people and unglamorous work painted at the scale once reserved for gods and generals.",
+    "baroque": "17th century: strong diagonals, theatrical light and dark, and a lot of drama aimed straight at the viewer.",
+    "still life": "Arranged objects — food, flowers, vessels. Often about abundance, and about decay: the fruit is always a little too ripe.",
+    "edo period": "Japan, 1615–1868. A long closed-off peace in which a wealthy merchant class drove a boom in prints, theatre and popular art.",
+    "oban": "A standard Japanese print size, roughly 25 × 38 cm — the format most famous ukiyo-e landscapes were made in.",
+}
 
 # Taste lives here. Passed as full-text search terms to each source.
 TOPICS = [
@@ -335,16 +367,28 @@ def compose(path, e, screen):
         maxw = SW - pad * 4
 
     f_artist, f_title = _font(SW // 67), _font(SW // 91)
-    f_facts, f_blurb = _font(SW // 122), _font(SW // 128)
-    room = (SH - pad - y) if side else (SH - pad - y)
+    f_facts, f_blurb, f_head = _font(SW // 122), _font(SW // 128), _font(SW // 155)
+    bottom = SH - pad
 
     def emit(text, font, colour, maxlines, lead):
+        """Draw wrapped text, stopping at the bottom margin. True if it all fit."""
         nonlocal y
-        for line in _wrap(d, text, font, maxw)[:maxlines]:
-            if y + lead > (SH - pad):
-                return
+        lines = _wrap(d, text, font, maxw)
+        for i, line in enumerate(lines[:maxlines]):
+            if y + lead > bottom:
+                return False
             d.text((x, y), line, font=font, fill=colour)
             y += lead
+        return len(lines) <= maxlines
+
+    def heading(text):
+        nonlocal y
+        if y + f_head.size * 2.4 > bottom:
+            return False
+        y += int(pad * 0.45)
+        d.text((x, y), text.upper(), font=f_head, fill=(132, 132, 142))
+        y += int(f_head.size * 1.7)
+        return True
 
     emit(e.get("artist") or "Unknown", f_artist, (255, 255, 255), 2, int(f_artist.size * 1.22))
     y += pad // 6
@@ -353,10 +397,24 @@ def compose(path, e, screen):
     y += pad // 4
     if facts(e):
         emit(facts(e), f_facts, (168, 168, 176), 4 if side else 1, int(f_facts.size * 1.35))
-    if e.get("blurb"):
-        y += pad // 3
-        lines = int(room / (f_blurb.size * 1.45)) if side else 3
-        emit(e["blurb"], f_blurb, (196, 196, 202), max(0, lines), int(f_blurb.size * 1.45))
+
+    if not side:  # bottom band: only room for the description itself
+        if e.get("blurb"):
+            y += pad // 3
+            emit(e["blurb"], f_blurb, (196, 196, 202), 3, int(f_blurb.size * 1.45))
+        canvas.save(path, "JPEG", quality=90)
+        return
+
+    lead = int(f_blurb.size * 1.45)
+    if e.get("blurb") and heading("About this work"):
+        emit(e["blurb"], f_blurb, (208, 208, 214), 99, lead)
+    if e.get("artist_bio") and heading("About the artist"):
+        emit(e["artist_bio"], f_blurb, (196, 196, 202), 99, lead)
+    if e.get("terms") and heading("Terms"):
+        for t in e["terms"]:
+            if not emit(t, f_blurb, (178, 178, 186), 99, lead):
+                break
+            y += pad // 8
 
     canvas.save(path, "JPEG", quality=90)
 
@@ -490,6 +548,70 @@ def write_gallery(home, store):
     (home / GALLERY).write_text("\n".join(out))
 
 
+def _wiki_try(title, sentences):
+    """One Wikipedia summary lookup. None if missing or a disambiguation page."""
+    try:
+        d = get_json(WIKI + urllib.parse.quote(title.replace(" ", "_")), timeout=15)
+    except Exception:
+        return None
+    if d.get("type", "").endswith(("not_found", "disambiguation")):
+        return None
+    text = clean(d.get("extract"))
+    # Common-name artists land on a disambiguation page that the API doesn't
+    # always type as one — "John Martin may refer to:" is worse than no bio.
+    if not text or re.search(r"\bmay refer to\b|\bmay also refer to\b", text, re.I):
+        return None
+    return " ".join(re.split(r"(?<=[.!?]) +", text)[:sentences])
+
+
+def wiki_bio(name, cache, sentences=2):
+    """Beginner-level context on the artist, from Wikipedia's summary endpoint."""
+    if not name:
+        return None
+    if name in cache:
+        return cache[name]
+    bio = None
+    for title in (name, f"{name} (painter)", f"{name} (artist)"):
+        bio = _wiki_try(title, sentences)
+        if bio:
+            break
+    cache[name] = bio
+    return bio
+
+
+def _term_label(term):
+    """Display form of a glossary key. str.title() gets both of these wrong:
+    'arts and crafts' -> 'Arts And Crafts', 'ukiyo-e' -> 'Ukiyo-E'."""
+    small = {"and", "on", "of", "the", "in", "a"}
+    words = [w if i and w in small else w[:1].upper() + w[1:] for i, w in enumerate(term.split())]
+    return " ".join(words)
+
+
+def glossary_for(e, limit=2):
+    """Explain the jargon in this work's style/medium, longest match first."""
+    hay = " ".join(
+        str(e.get(k) or "").lower() for k in ("style", "medium", "origin", "title")
+    )
+    hits = [(term, defn) for term, defn in GLOSSARY.items() if term in hay]
+    hits.sort(key=lambda t: -len(t[0]))
+    out, used = [], set()
+    for term, defn in hits:
+        if any(term in u or u in term for u in used):
+            continue  # don't explain "woodblock" right after "ukiyo-e"
+        used.add(term)
+        out.append(f"{_term_label(term)} — {defn}")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def enrich(c, cache):
+    """Attach beginner-facing context: artist bio and a jargon glossary."""
+    c["artist_bio"] = wiki_bio(c.get("artist"), cache)
+    c["terms"] = glossary_for(c)
+    return c
+
+
 def wanted(c, min_width, min_ratio):
     return c["width"] >= min_width and c["width"] / c["height"] >= min_ratio
 
@@ -604,7 +726,7 @@ def main():
     if args.recompose:
         # Composing overwrites the file, so a rebuild has to start from the
         # source again rather than re-processing an already-composed image.
-        done = 0
+        done, bios = 0, {}
         print(f"Rebuilding at {screen[0]}x{screen[1]}…" if screen else "Rebuilding raw…")
         where = {"live": args.live, "backlog": backlog, "archive": archive}
         for key, e in store.items():
@@ -612,6 +734,10 @@ def main():
             if not d or not (d / (e.get("filename") or "")).exists():
                 continue  # no file to rebuild
             try:
+                # Key presence, not truthiness: a genuinely bio-less artist
+                # shouldn't be re-looked-up on every rebuild.
+                if "artist_bio" not in e or "terms" not in e:
+                    enrich(e, bios)  # backfill context onto pre-existing entries
                 path = fetch(e, d, args.min_width, screen)
                 e["filename"], e["composed"] = path.name, bool(screen)
                 done += 1
@@ -648,11 +774,12 @@ def main():
     breakdown = ", ".join(f"{k}:{v}" for k, v in sorted(by_src.items())) or "none"
     print(f"{len(pool)} candidates pass filters ({breakdown}), {len(fresh)} not yet seen")
 
-    added = 0
+    added, bios = 0, {}
     for c in fresh:
         if added >= args.add:
             break
         try:
+            enrich(c, bios)
             path = fetch(c, backlog, args.min_width, screen)
             added += 1
             store[f"{c['source']}-{c['id']}"] = {
