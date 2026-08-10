@@ -1,7 +1,21 @@
 # artwall
 
-Keeps `~/Pictures/Wallpapers` topped up with high-resolution public-domain art,
-so macOS's built-in folder rotation always has something new to show.
+Puts a different public-domain artwork on your Mac desktop every morning,
+captioned like a museum wall label.
+
+Three folders, two jobs. A **weekly** job does all the network work and stocks a
+backlog; a **daily** job just moves one file. Nothing fetches on the critical
+path, so a slow museum API can never leave you without a wallpaper.
+
+```
+~/Pictures/artwall/backlog/   queued, ready to show
+~/Pictures/Wallpapers/        exactly one image — macOS points here
+~/Pictures/artwall/archive/   everything already shown
+```
+
+The live folder holds exactly **one** image on purpose. macOS shuffles the
+desktop and lock screen independently, so a one-item folder is the only choice
+both can land on — see [Matching the lock screen](#matching-the-lock-screen).
 
 Stdlib-only Python 3 — no `requests`, no venv, no dependencies to break a
 scheduled run.
@@ -43,7 +57,9 @@ a deliberate opt-out, so this tool doesn't touch it.
 No loss in practice: Artvee is an *index* over these same institutions, and
 going direct to their APIs returns higher-resolution masters than Artvee's free
 tier serves. Browsing Artvee yourself is unaffected — drop anything you find
-there into `~/Pictures/Wallpapers` and it joins the rotation.
+there into `~/Pictures/artwall/backlog/` and it takes its turn like any other.
+Hand-added images rotate normally; they just have no catalogue entry, so they
+show up unlabelled and without a description.
 
 ## Descriptions
 
@@ -75,18 +91,18 @@ and the label double up on every pass.
 Composing is the one feature with a dependency (Pillow). It degrades
 gracefully: without Pillow the artwork still downloads, just unlabelled.
 
-Each run also writes two files alongside the images:
+Each run also writes two files into `~/Pictures/artwall/`:
 
 - **`GALLERY.md`** — artist and life dates, year, medium, origin, museum, the
   museum's own written description where one exists, and a link to the work's
-  page. Split into what's **in rotation** now and what's been **previously
-  shown**.
-- **`.artwall.json`** — the hidden metadata store `GALLERY.md` is generated
-  from. Delete it and you lose descriptions, not images.
+  page. Grouped **Now showing** / **Up next** / **Previously shown**.
+- **`.artwall.json`** — the metadata store `GALLERY.md` is generated from, with
+  each work's `state` (`backlog` / `live` / `archive`). Delete it and you lose
+  descriptions, not images.
 
-Store entries deliberately outlive their images. They are both the dedup memory
-(so a work is never fetched twice) and the reading history — with a small
-`--keep`, the folder is no longer a record of what you've seen.
+Store entries deliberately outlive their images: they are both the dedup memory
+(so a work is never fetched twice) and the reading history. With one image live,
+the folder is no record of what you've seen.
 
 Prose coverage varies by institution, and the tool is explicit about which
 entries have it:
@@ -101,12 +117,9 @@ Every entry always gets the structured facts and a museum link regardless.
 
 macOS gives no way to ask which wallpaper is currently displayed — the old
 AppleScript hook returns `missing value` under folder rotation, and the Sonoma
-private store holds no image paths. So matching a picture to its entry goes via
-the filename, which carries artist and title; `GALLERY.md` lists it under each
-work.
-
-Images you add by hand are listed under **Not catalogued** rather than silently
-omitted.
+private store holds no image paths. With one image live that no longer matters:
+whatever is in `~/Pictures/Wallpapers/` *is* what you're looking at, and
+`GALLERY.md` opens with it under **Now showing**.
 
 ## Install
 
@@ -116,13 +129,25 @@ Runs are manual by default:
 ./artwall.py
 ```
 
-`./install.sh` installs a launchd agent that runs daily at 07:00 with
-`--add 1 --keep 1`, logging to `~/Library/Logs/artwall.log`. Remove it with:
+`./install.sh` installs two launchd agents, logging to
+`~/Library/Logs/artwall.log`:
+
+| Agent | When | Does |
+|---|---|---|
+| `com.jaedon.artwall.fill` | Sundays 08:00 | `--add 7` — fetches a week into the backlog |
+| `com.jaedon.artwall.rotate` | daily 07:00 | `--rotate` — archives the live image, promotes one from the backlog |
+
+Remove them with:
 
 ```bash
-launchctl bootout gui/$(id -u)/com.jaedon.artwall
-rm ~/Library/LaunchAgents/com.jaedon.artwall.plist
+launchctl bootout gui/$(id -u)/com.jaedon.artwall.fill
+launchctl bootout gui/$(id -u)/com.jaedon.artwall.rotate
+rm ~/Library/LaunchAgents/com.jaedon.artwall.*.plist
 ```
+
+If the backlog is empty when `--rotate` runs, it fetches one directly and says
+so on stderr — the desktop never goes stale, but a warning in the log means the
+weekly fill didn't run.
 
 Either way, one manual step is needed once — macOS moved wallpaper state into a
 private store in Sonoma, so this can't be scripted reliably:
@@ -140,31 +165,27 @@ macOS keeps two wallpaper contexts — `AllSpacesAndDisplays` (desktop) and
 they shuffle **independently**, each holding its own current pick, so with N
 images they agree roughly 1 day in N. There is no setting to link the choice.
 
-The fix is to remove the choice. Keep exactly **one** image in the folder and
-let artwall swap it, which is what the installed job does:
-
-```bash
-./artwall.py --add 1 --keep 1
-```
-
-Two shufflers over a one-item folder can only land on the same image. You still
-get a new work daily; the rotation comes from artwall replacing the file rather
-than from macOS picking among many.
+The fix is to remove the choice. The live folder holds exactly **one** image
+and `--rotate` swaps it. Two shufflers over a one-item folder can only land on
+the same image. You still get a new work daily — the rotation comes from artwall
+moving files rather than from macOS picking among many.
 
 ## Usage
 
 ```bash
-./artwall.py                                       # top up with default topics
+./artwall.py                                       # fill the backlog (weekly job)
+./artwall.py --rotate                              # swap today's image (daily job)
+./artwall.py --list                                # status across all three folders
 ./artwall.py --topics "bauhaus,constructivism" --add 12
 ./artwall.py --sources met --add 5                 # one source only
-./artwall.py --min-width 3800                      # for a 5K display
-./artwall.py --list
 ```
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--add` | 5 | new images to fetch this run |
-| `--keep` | 40 | prune folder to this many, oldest first (`1` to match the lock screen) |
+| `--add` | 7 | how many to fetch into the backlog |
+| `--rotate` | — | archive the live image, promote one from the backlog |
+| `--home` | `~/Pictures/artwall` | holds `backlog/`, `archive/`, catalogue |
+| `--live` | `~/Pictures/Wallpapers` | the folder macOS points at |
 | `--min-width` | 3000 | raise to 3800 for a 5K Studio Display |
 | `--min-ratio` | 1.2 | width/height; keeps things landscape-ish |
 | `--topics` | see `TOPICS` | comma-separated full-text search terms |

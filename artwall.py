@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -25,8 +26,14 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 
-DEST = Path.home() / "Pictures" / "Wallpapers"
-STORE = ".artwall.json"  # hidden metadata store, lives beside the images
+# Three folders. The weekly job fills the backlog (all the network work); the
+# daily job just moves one file backlog -> live -> archive. LIVE is what macOS
+# points at and holds exactly one image, which is what keeps the desktop and
+# lock screen showing the same picture — they shuffle independently, so a
+# one-item folder is the only choice both can land on.
+HOME = Path.home() / "Pictures" / "artwall"
+LIVE = Path.home() / "Pictures" / "Wallpapers"
+STORE = ".artwall.json"  # metadata store, lives in HOME
 GALLERY = "GALLERY.md"  # human-readable index, regenerated every run
 
 MUSEUM = {
@@ -354,15 +361,61 @@ def compose(path, e, screen):
     canvas.save(path, "JPEG", quality=90)
 
 
-def load_store(dest):
+def load_store(home):
     try:
-        return json.loads((dest / STORE).read_text())
+        return json.loads((home / STORE).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
 
-def save_store(dest, store):
-    (dest / STORE).write_text(json.dumps(store, indent=1, ensure_ascii=False))
+def save_store(home, store):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / STORE).write_text(json.dumps(store, indent=1, ensure_ascii=False))
+
+
+def dirs(home):
+    """(backlog, archive), created on demand."""
+    b, a = home / "backlog", home / "archive"
+    for d in (b, a):
+        d.mkdir(parents=True, exist_ok=True)
+    return b, a
+
+
+def migrate(home, live_dir):
+    """Move a pre-three-folder store into HOME and label existing states."""
+    old = live_dir / STORE
+    if (home / STORE).exists() or not old.exists():
+        return
+    store = json.loads(old.read_text())
+    on_disk = {p.name for p in live_dir.glob("*.jpg")}
+    for e in store.values():
+        e["state"] = "live" if e.get("filename") in on_disk else "gone"
+    save_store(home, store)
+    old.unlink()
+    (live_dir / GALLERY).unlink(missing_ok=True)
+    print(f"Migrated {len(store)} catalogued works into {home}")
+
+
+def rotate(home, live_dir, store):
+    """Retire the live image to the archive and promote one from the backlog."""
+    backlog, archive = dirs(home)
+    live_dir.mkdir(parents=True, exist_ok=True)
+    by_name = {e.get("filename"): e for e in store.values()}
+
+    for p in sorted(live_dir.glob("*.jpg")):
+        shutil.move(str(p), str(archive / p.name))
+        if p.name in by_name:
+            by_name[p.name]["state"] = "archive"
+        print(f"  → archived {p.name}")
+
+    queued = sorted(backlog.glob("*.jpg"))
+    if not queued:
+        return None
+    pick = random.choice(queued)
+    shutil.move(str(pick), str(live_dir / pick.name))
+    if pick.name in by_name:
+        by_name[pick.name]["state"] = "live"
+    return pick.name
 
 
 def facts(c):
@@ -371,78 +424,70 @@ def facts(c):
     return " · ".join(b for b in bits if b)
 
 
-def write_gallery(dest, store):
-    """Regenerate the human-readable index from the metadata store.
-
-    Images added by hand (an Artvee download, say) have no store entry; list
-    them separately rather than pretending the folder holds less than it does.
-    """
-    on_disk = {p.name for p in dest.glob("*.jpg")}
-    live, past = [], []
+def write_gallery(home, store):
+    """Regenerate the human-readable index, grouped by which folder each is in."""
+    groups = {"live": [], "backlog": [], "archive": [], "gone": []}
     for e in store.values():
-        (live if e.get("filename") in on_disk else past).append(e)
-    live.sort(key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
-    past.sort(key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
-    entries = live
-    strays = sorted(n for n in on_disk if n not in {e.get("filename") for e in store.values()})
+        groups.get(e.get("state", "gone"), groups["gone"]).append(e)
+    for k in ("backlog", "archive", "gone"):
+        groups[k].sort(key=lambda e: (e.get("artist") or "~", e.get("title") or ""))
+    seen = len(groups["archive"]) + len(groups["gone"])
+
     out = [
         "# Wallpapers",
         "",
-        f"*{len(entries)} in rotation, {len(past)} previously shown · "
+        f"*{len(groups['backlog'])} queued, {seen} already shown · "
         f"regenerated {date.today().isoformat()}*",
-        "",
-        "Filenames are `{source}-{id}-{artist}-{title}.jpg`, so you can match "
-        "an image in Finder to its entry below.",
         "",
         "---",
         "",
     ]
-    for e in entries:
-        out.append(f"## {e.get('artist') or 'Unknown'} — {e.get('title') or 'Untitled'}")
-        out.append("")
+
+    def full(e):
+        block = [f"## {e.get('artist') or 'Unknown'} — {e.get('title') or 'Untitled'}", ""]
         if e.get("artist_full"):
-            out.append(f"**{e['artist_full']}**  ")
+            block.append(f"**{e['artist_full']}**  ")
         if facts(e):
-            out.append(f"{facts(e)}  ")
-        out.append(f"`{e.get('filename', '')}` · {e.get('width')}×{e.get('height')}")
-        out.append("")
+            block.append(f"{facts(e)}  ")
+        block += [f"`{e.get('filename', '')}` · {e.get('width')}×{e.get('height')}", ""]
         if e.get("blurb"):
-            out += [e["blurb"], ""]
+            block += [e["blurb"], ""]
         if e.get("page"):
-            out += [f"[View at the museum]({e['page']})", ""]
+            block += [f"[View at the museum]({e['page']})", ""]
+        return block + ["---", ""]
+
+    def brief(e):
+        bits = [f"**{e.get('artist') or 'Unknown'} — {e.get('title') or 'Untitled'}**"]
+        if facts(e):
+            bits.append(f"  \n{facts(e)}")
+        if e.get("blurb"):
+            bits.append(f"  \n{clean(e['blurb'], 400)}")
+        if e.get("page"):
+            bits.append(f"  \n[View at the museum]({e['page']})")
+        return ["".join(bits), ""]
+
+    if groups["live"]:
+        out += ["# Now showing", ""]
+        for e in groups["live"]:
+            out += full(e)
+
+    if groups["backlog"]:
+        out += ["# Up next", "", f"{len(groups['backlog'])} waiting in the backlog.", ""]
+        for e in groups["backlog"]:
+            out += brief(e)
         out += ["---", ""]
 
-    if past:
+    if groups["archive"] or groups["gone"]:
         out += [
-            "## Previously shown",
+            "# Previously shown",
             "",
-            "Rotated out of the folder, kept here so the record survives — and so "
-            "the same work isn't fetched twice.",
+            "Kept so the record survives — and so the same work is never fetched twice.",
             "",
         ]
-        for e in past:
-            bits = [f"**{e.get('artist') or 'Unknown'} — {e.get('title') or 'Untitled'}**"]
-            if facts(e):
-                bits.append(f"  \n{facts(e)}")
-            if e.get("blurb"):
-                bits.append(f"  \n{clean(e['blurb'], 400)}")
-            if e.get("page"):
-                bits.append(f"  \n[View at the museum]({e['page']})")
-            out += ["".join(bits), ""]
-        out += ["---", ""]
+        for e in groups["archive"] + groups["gone"]:
+            out += brief(e)
 
-    if strays:
-        out += [
-            "## Not catalogued",
-            "",
-            f"{len(strays)} image(s) in the folder that artwall didn't fetch, so there's "
-            "no metadata for them — added by hand, or downloaded before descriptions "
-            "were added. They still rotate normally.",
-            "",
-        ]
-        out += [f"- `{n}`" for n in strays] + [""]
-
-    (dest / GALLERY).write_text("\n".join(out))
+    (home / GALLERY).write_text("\n".join(out))
 
 
 def wanted(c, min_width, min_ratio):
@@ -498,14 +543,15 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--dest", type=Path, default=DEST)
+    ap.add_argument("--home", type=Path, default=HOME, help="holds backlog/, archive/, catalogue")
+    ap.add_argument("--live", type=Path, default=LIVE, help="folder macOS points at (one image)")
     ap.add_argument("--topics", help="comma-separated search terms (overrides defaults)")
-    ap.add_argument("--add", type=int, default=5, help="how many new images to fetch")
-    ap.add_argument("--keep", type=int, default=40, help="prune folder to this many, oldest first")
+    ap.add_argument("--add", type=int, default=7, help="how many to fetch into the backlog")
+    ap.add_argument("--rotate", action="store_true", help="daily: archive the live image, promote one from the backlog")
     ap.add_argument("--min-width", type=int, default=3000)
     ap.add_argument("--min-ratio", type=float, default=1.2, help="w/h; 1.2 keeps it landscape-ish")
     ap.add_argument("--sources", help="comma-separated subset of: aic,cma,met")
-    ap.add_argument("--list", action="store_true", help="list current folder and exit")
+    ap.add_argument("--list", action="store_true", help="show status across all three folders")
     ap.add_argument("--raw", action="store_true", help="save the bare artwork, no label")
     ap.add_argument("--screen", help="compose for this size, e.g. 2560x1440 (default: detected)")
     ap.add_argument(
@@ -524,42 +570,62 @@ def main():
         else:
             screen = detect_screen()
 
-    args.dest.mkdir(parents=True, exist_ok=True)
-    existing = sorted(args.dest.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+    migrate(args.home, args.live)
+    backlog, archive = dirs(args.home)
+    args.live.mkdir(parents=True, exist_ok=True)
+    store = load_store(args.home)
 
     if args.list:
-        for p in existing:
-            print(f"{p.stat().st_size // 1024:>6} KB  {p.name}")
-        print(f"\n{len(existing)} images in {args.dest}")
+        for label, d in (("live", args.live), ("backlog", backlog), ("archive", archive)):
+            files = sorted(d.glob("*.jpg"))
+            mb = sum(p.stat().st_size for p in files) / 1024 / 1024
+            print(f"  {label:<8} {len(files):>3} image(s)  {mb:5.1f} MB  {d}")
+            if label == "live":
+                for p in files:
+                    print(f"           {p.name}")
+        print(f"\n  catalogued: {len(store)} works")
         return 0
+
+    if args.rotate:
+        shown = rotate(args.home, args.live, store)
+        if shown is None:
+            # Backlog dry: fetch one now so the desktop never goes stale, and
+            # say so loudly — it means the weekly fill didn't run.
+            print("  ! backlog empty — fetching one directly", file=sys.stderr)
+            args.add, args.rotate = 1, False
+        else:
+            e = next((v for v in store.values() if v.get("filename") == shown), {})
+            print(f"\n  now showing: {e.get('artist') or '?'} — {e.get('title') or shown}")
+            print(f"  {len(list(backlog.glob('*.jpg')))} left in backlog")
+            save_store(args.home, store)
+            write_gallery(args.home, store)
+            return 0
 
     if args.recompose:
         # Composing overwrites the file, so a rebuild has to start from the
         # source again rather than re-processing an already-composed image.
-        store = load_store(args.dest)
         done = 0
         print(f"Rebuilding at {screen[0]}x{screen[1]}…" if screen else "Rebuilding raw…")
-        on_disk = {p.name for p in args.dest.glob("*.jpg")}
+        where = {"live": args.live, "backlog": backlog, "archive": archive}
         for key, e in store.items():
-            if e.get("filename") not in on_disk:
-                continue  # archived: catalogued but rotated out, no file to rebuild
+            d = where.get(e.get("state"))
+            if not d or not (d / (e.get("filename") or "")).exists():
+                continue  # no file to rebuild
             try:
-                path = fetch(e, args.dest, args.min_width, screen)
+                path = fetch(e, d, args.min_width, screen)
                 e["filename"], e["composed"] = path.name, bool(screen)
                 done += 1
                 print(f"  ✓ {e.get('artist')} — {e.get('title')}")
             except Exception as exc:
                 print(f"  ! {key}: {exc}", file=sys.stderr)
-        save_store(args.dest, store)
-        write_gallery(args.dest, store)
+        save_store(args.home, store)
+        write_gallery(args.home, store)
         print(f"\nRebuilt {done} image(s).")
         return 0
 
-    # Dedup against everything ever fetched, not just what's still on disk —
-    # with a small --keep, the folder is no longer a record of what's been seen.
-    have = set(load_store(args.dest)) | {
-        "-".join(p.name.split("-")[:2]) for p in existing if "-" in p.name
-    }
+    # Dedup against everything ever catalogued, in any folder — the live folder
+    # holds one image and is no record of what's been seen.
+    have = set(store)
     topics = [t.strip() for t in args.topics.split(",")] if args.topics else TOPICS
     sources = SOURCES
     if args.sources:
@@ -580,20 +646,20 @@ def main():
     for c in pool:
         by_src[c["source"]] = by_src.get(c["source"], 0) + 1
     breakdown = ", ".join(f"{k}:{v}" for k, v in sorted(by_src.items())) or "none"
-    print(f"{len(pool)} candidates pass filters ({breakdown}), {len(fresh)} not already on disk")
+    print(f"{len(pool)} candidates pass filters ({breakdown}), {len(fresh)} not yet seen")
 
-    store = load_store(args.dest)
     added = 0
     for c in fresh:
         if added >= args.add:
             break
         try:
-            path = fetch(c, args.dest, args.min_width, screen)
+            path = fetch(c, backlog, args.min_width, screen)
             added += 1
             store[f"{c['source']}-{c['id']}"] = {
                 **c,
                 "filename": path.name,
                 "composed": bool(screen),
+                "state": "backlog",
             }
             print(f"\n  + {c.get('artist') or '?'} — {c.get('title')}")
             print(f"    {facts(c)} · {c['width']}×{c['height']}")
@@ -602,24 +668,19 @@ def main():
         except Exception as e:
             print(f"  ! {c['source']}-{c['id']}: {e}", file=sys.stderr)
 
-    files = sorted(args.dest.glob("*.jpg"), key=lambda p: p.stat().st_mtime)
-    for p in files[: max(0, len(files) - args.keep)]:
-        p.unlink()
-        print(f"  - pruned {p.name}")
+    # If the backlog ran dry, promote immediately so the desktop isn't left stale.
+    if added and not list(args.live.glob("*.jpg")):
+        rotate(args.home, args.live, store)
 
     # Store entries outlive their images on purpose: they're the dedup memory
-    # (so a work isn't fetched twice) and the GALLERY history. Pruning the
-    # folder to one image would otherwise erase both.
-    save_store(args.dest, store)
-    write_gallery(args.dest, store)
+    # (so a work is never fetched twice) and the GALLERY history.
+    save_store(args.home, store)
+    write_gallery(args.home, store)
 
-    live = {p.name for p in args.dest.glob("*.jpg")}
+    queued = len(list(backlog.glob("*.jpg")))
     described = sum(1 for e in store.values() if e.get("blurb"))
-    print(f"\nAdded {added}. Folder holds {len(live)} image(s) at {args.dest}")
-    print(
-        f"Wrote {GALLERY} — {len(live)} in rotation, {len(store) - len(live)} archived, "
-        f"{described} with a written description"
-    )
+    print(f"\nAdded {added} to the backlog — {queued} queued, {len(store)} catalogued")
+    print(f"Wrote {args.home / GALLERY} ({described} with a written description)")
     return 0
 
 
