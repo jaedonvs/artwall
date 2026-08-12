@@ -163,6 +163,21 @@ If the backlog is empty when `--rotate` runs, it fetches one directly and says
 so on stderr — the desktop never goes stale, but a warning in the log means the
 weekly fill didn't run.
 
+### Making macOS notice
+
+Swapping the file is not enough. `WallpaperAgent` caches its chosen image, and
+with a folder set to shuffle it was observed **not to re-evaluate for two days**
+— the store's `LastUse` stayed frozen while the folder changed underneath it, so
+the same painting stayed on screen. Two things are needed on every swap:
+
+- **`os.utime(dest, None)`** — `shutil.move` preserves mtime, so a promoted
+  image can carry a timestamp days old. To a folder scan, nothing looks new.
+- **`killall WallpaperAgent`** — forces a re-read. launchd restarts it
+  immediately; the only visible effect is a brief flicker.
+
+`nudge_macos()` does the second, and it's the load-bearing half. Restarting the
+agent moved the store's `LastUse` from two days stale to the current second.
+
 Either way, one manual step is needed once — macOS moved wallpaper state into a
 private store in Sonoma, so this can't be scripted reliably:
 

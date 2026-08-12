@@ -454,6 +454,17 @@ def migrate(home, live_dir):
     print(f"Migrated {len(store)} catalogued works into {home}")
 
 
+def nudge_macos():
+    """Make macOS actually re-read the wallpaper folder.
+
+    WallpaperAgent caches its chosen image and, with a folder set to shuffle, was
+    observed not to re-evaluate for days — swapping the file underneath it
+    changes nothing on screen. Restarting the agent forces a re-read; launchd
+    brings it straight back.
+    """
+    return os.system("killall WallpaperAgent >/dev/null 2>&1") == 0
+
+
 def rotate(home, live_dir, store):
     """Retire the live image to the archive and promote one from the backlog."""
     backlog, archive = dirs(home)
@@ -470,9 +481,14 @@ def rotate(home, live_dir, store):
     if not queued:
         return None
     pick = random.choice(queued)
-    shutil.move(str(pick), str(live_dir / pick.name))
+    dest = live_dir / pick.name
+    shutil.move(str(pick), str(dest))
+    # shutil.move preserves mtime, so a freshly promoted image can carry a
+    # timestamp days old — old enough that a folder scan sees nothing new.
+    os.utime(dest, None)
     if pick.name in by_name:
         by_name[pick.name]["state"] = "live"
+    nudge_macos()
     return pick.name
 
 
@@ -746,6 +762,7 @@ def main():
                 print(f"  ! {key}: {exc}", file=sys.stderr)
         save_store(args.home, store)
         write_gallery(args.home, store)
+        nudge_macos()  # the live image's bytes changed under a path macOS caches
         print(f"\nRebuilt {done} image(s).")
         return 0
 
