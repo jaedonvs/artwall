@@ -163,6 +163,25 @@ If the backlog is empty when `--rotate` runs, it fetches one directly and says
 so on stderr — the desktop never goes stale, but a warning in the log means the
 weekly fill didn't run.
 
+### The live image has a fixed name
+
+`~/Pictures/Wallpapers/current.jpg` — always that path, whatever the work.
+
+macOS does not track the folder. Its stored config is `type: imageFile`, pinned
+to one **filename**, so giving each day's image its own descriptive name broke
+the reference every morning:
+
+- the **lock screen** re-reads from disk, found nothing, and fell back to the
+  system default;
+- the **desktop** kept rendering a cached copy of the file that had gone, which
+  looked like the wallpaper being stuck on one painting for days.
+
+Both symptoms, one cause. The catalogue name is restored when the image is
+archived, so `archive/` still reads as a gallery.
+
+Re-pointing macOS at `current.jpg` is a one-time manual step; after that the
+path never changes again.
+
 ### Making macOS notice
 
 Swapping the file is not enough. `WallpaperAgent` caches its chosen image, and

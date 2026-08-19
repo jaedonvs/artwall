@@ -35,6 +35,11 @@ HOME = Path.home() / "Pictures" / "artwall"
 LIVE = Path.home() / "Pictures" / "Wallpapers"
 STORE = ".artwall.json"  # metadata store, lives in HOME
 GALLERY = "GALLERY.md"  # human-readable index, regenerated every run
+# The live image always sits at this one path. macOS pins its wallpaper to a
+# specific filename (the stored config is type "imageFile"), so a new name each
+# day silently breaks the reference: the lock screen falls back to a default and
+# the desktop keeps rendering a cached copy of the file that has gone.
+LIVE_NAME = "current.jpg"
 
 MUSEUM = {
     "aic": "Art Institute of Chicago",
@@ -465,29 +470,51 @@ def nudge_macos():
     return os.system("killall WallpaperAgent >/dev/null 2>&1") == 0
 
 
+def disk_path(e, live_dir, backlog, archive):
+    """Where this entry's file actually lives, honouring the stable live name."""
+    st, name = e.get("state"), e.get("filename") or ""
+    if st == "live":
+        return live_dir / LIVE_NAME
+    if st == "backlog":
+        return backlog / name
+    if st == "archive":
+        return archive / name
+    return None
+
+
 def rotate(home, live_dir, store):
     """Retire the live image to the archive and promote one from the backlog."""
     backlog, archive = dirs(home)
     live_dir.mkdir(parents=True, exist_ok=True)
-    by_name = {e.get("filename"): e for e in store.values()}
+    live_path = live_dir / LIVE_NAME
+    current = next((e for e in store.values() if e.get("state") == "live"), None)
 
-    for p in sorted(live_dir.glob("*.jpg")):
-        shutil.move(str(p), str(archive / p.name))
-        if p.name in by_name:
-            by_name[p.name]["state"] = "archive"
-        print(f"  → archived {p.name}")
+    if live_path.exists():
+        name = (current or {}).get("filename") or live_path.name
+        shutil.move(str(live_path), str(archive / name))
+        if current:
+            current["state"] = "archive"
+        print(f"  \u2192 archived {name}")
+
+    # Leftovers from before the stable name existed.
+    for stray in sorted(live_dir.glob("*.jpg")):
+        shutil.move(str(stray), str(archive / stray.name))
+        e = next((v for v in store.values() if v.get("filename") == stray.name), None)
+        if e:
+            e["state"] = "archive"
+        print(f"  \u2192 archived {stray.name}")
 
     queued = sorted(backlog.glob("*.jpg"))
     if not queued:
         return None
     pick = random.choice(queued)
-    dest = live_dir / pick.name
-    shutil.move(str(pick), str(dest))
-    # shutil.move preserves mtime, so a freshly promoted image can carry a
-    # timestamp days old — old enough that a folder scan sees nothing new.
-    os.utime(dest, None)
-    if pick.name in by_name:
-        by_name[pick.name]["state"] = "live"
+    shutil.move(str(pick), str(live_path))
+    # shutil.move preserves mtime; a promoted image could otherwise carry a
+    # timestamp days old and look unchanged to a folder scan.
+    os.utime(live_path, None)
+    e = next((v for v in store.values() if v.get("filename") == pick.name), None)
+    if e:
+        e["state"] = "live"
     nudge_macos()
     return pick.name
 
@@ -719,8 +746,11 @@ def main():
             mb = sum(p.stat().st_size for p in files) / 1024 / 1024
             print(f"  {label:<8} {len(files):>3} image(s)  {mb:5.1f} MB  {d}")
             if label == "live":
+                cur = next((v for v in store.values() if v.get("state") == "live"), None)
+                if cur:
+                    print(f"           {cur.get('artist') or '?'} — {cur.get('title') or ''}")
                 for p in files:
-                    print(f"           {p.name}")
+                    print(f"           ({p.name})")
         print(f"\n  catalogued: {len(store)} works")
         return 0
 
@@ -747,7 +777,8 @@ def main():
         where = {"live": args.live, "backlog": backlog, "archive": archive}
         for key, e in store.items():
             d = where.get(e.get("state"))
-            if not d or not (d / (e.get("filename") or "")).exists():
+            on_disk = disk_path(e, args.live, backlog, archive)
+            if not d or not on_disk or not on_disk.exists():
                 continue  # no file to rebuild
             try:
                 # Key presence, not truthiness: a genuinely bio-less artist
@@ -755,7 +786,11 @@ def main():
                 if "artist_bio" not in e or "terms" not in e:
                     enrich(e, bios)  # backfill context onto pre-existing entries
                 path = fetch(e, d, args.min_width, screen)
-                e["filename"], e["composed"] = path.name, bool(screen)
+                if e.get("state") == "live" and path.name != LIVE_NAME:
+                    shutil.move(str(path), str(args.live / LIVE_NAME))
+                else:
+                    e["filename"] = path.name
+                e["composed"] = bool(screen)
                 done += 1
                 print(f"  ✓ {e.get('artist')} — {e.get('title')}")
             except Exception as exc:
